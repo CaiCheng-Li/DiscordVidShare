@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Build artifacts
+build/
+dist/
+*.spec.bak
+
+# App output / test media
+sample.mp4
+*.log
+ffmpeg2pass*.log*
+
+# OS / editor
+Thumbs.db
+.DS_Store
+.vscode/
+.idea/
