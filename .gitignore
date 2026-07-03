@@ -8,7 +8,11 @@ env/
 
 # Build artifacts
 build/
+build*/
 dist/
+dist*/
+release/
+*.spec
 *.spec.bak
 
 # App output / test media
@@ -21,3 +25,6 @@ Thumbs.db
 .DS_Store
 .vscode/
 .idea/
+
+# misc
+ToDo.txt

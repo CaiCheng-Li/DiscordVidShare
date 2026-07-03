@@ -30,21 +30,32 @@ def set_overrides(ffmpeg: str | None, ffprobe: str | None) -> None:
     _ffprobe_override = ffprobe or None
 
 
-def _app_dir() -> Path:
-    """Directory of the running app (handles PyInstaller frozen builds)."""
+def _bundled_dirs() -> list[Path]:
+    """Directories to search for a bundled ffmpeg/ffprobe.
+
+    Covers PyInstaller layouts: `sys._MEIPASS` (onefile extraction dir / onedir
+    _internal) and the executable's own directory, plus the source-tree root.
+    """
+    dirs: list[Path] = []
     if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
-    return Path(__file__).resolve().parent.parent
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            dirs.append(Path(meipass))
+        dirs.append(Path(sys.executable).resolve().parent)
+    else:
+        dirs.append(Path(__file__).resolve().parent.parent)
+    return dirs
 
 
 def _discover(tool: str, override: str | None) -> str:
-    """Resolve a tool path: override -> alongside app -> PATH."""
+    """Resolve a tool path: override -> bundled next to app -> PATH."""
     if override and Path(override).exists():
         return override
     exe = f"{tool}.exe" if sys.platform == "win32" else tool
-    local = _app_dir() / exe
-    if local.exists():
-        return str(local)
+    for d in _bundled_dirs():
+        candidate = d / exe
+        if candidate.exists():
+            return str(candidate)
     found = shutil.which(tool)
     if found:
         return found
@@ -71,12 +82,43 @@ def ffmpeg_available() -> bool:
         return False
 
 
+def child_env() -> dict | None:
+    """Environment for spawning ffmpeg/ffprobe. None means "inherit unchanged".
+
+    In a PyInstaller build the frozen process has its bundle dirs (which hold Qt's
+    own ffmpeg DLLs plus a specific UCRT) prepended to PATH. Handing that PATH to the
+    bundled ffmpeg/ffprobe can make them resolve the wrong DLLs and fail. Strip those
+    bundle dirs so the child uses normal system library resolution.
+    """
+    if not getattr(sys, "frozen", False):
+        return None
+    env = os.environ.copy()
+    roots: list[str] = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        roots.append(os.path.normcase(os.path.abspath(meipass)))
+    roots.append(os.path.normcase(os.path.abspath(os.path.dirname(sys.executable))))
+
+    kept: list[str] = []
+    for entry in env.get("PATH", "").split(os.pathsep):
+        if not entry:
+            continue
+        norm = os.path.normcase(os.path.abspath(entry))
+        if any(norm == r or norm.startswith(r + os.sep) for r in roots):
+            continue
+        kept.append(entry)
+    env["PATH"] = os.pathsep.join(kept)
+    return env
+
+
 def _run(cmd: list[str]) -> subprocess.CompletedProcess:
     return subprocess.run(
         cmd,
         capture_output=True,
         text=True,
         creationflags=CREATE_NO_WINDOW,
+        stdin=subprocess.DEVNULL,
+        env=child_env(),
     )
 
 
@@ -102,7 +144,7 @@ def probe(path: str) -> MediaInfo:
     ffprobe = discover_ffprobe()
     cmd = [
         ffprobe,
-        "-v", "quiet",
+        "-v", "error",
         "-print_format", "json",
         "-show_format",
         "-show_streams",
@@ -110,7 +152,10 @@ def probe(path: str) -> MediaInfo:
     ]
     proc = _run(cmd)
     if proc.returncode != 0 or not proc.stdout.strip():
-        raise RuntimeError(f"ffprobe could not read the file:\n{proc.stderr.strip()}")
+        detail = proc.stderr.strip() or (
+            f"(no stderr; exit code {proc.returncode}, {len(proc.stdout)} bytes stdout)"
+        )
+        raise RuntimeError(f"ffprobe could not read the file:\n{detail}")
 
     data = json.loads(proc.stdout)
     fmt = data.get("format", {})

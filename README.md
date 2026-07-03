@@ -38,7 +38,20 @@ python -m venv .venv
 .venv\Scripts\python build_exe.py --bundle-ffmpeg  REM self-contained (larger)
 ```
 
-The executable is written to `dist\DiscordVidShare\`.
+The executable is written to `dist\DiscordVidShare\` (`DiscordVidShare.exe` plus an
+`_internal\` folder — distribute the whole folder, e.g. as a zip). A self-contained build
+bundles `ffmpeg.exe`/`ffprobe.exe` into `_internal\`, so it runs on any Win10/11 PC with
+nothing else installed (~290 MB folder, ~160 MB zip).
+
+### Checking a build
+
+Run the app with `--selftest <video>` to confirm FFmpeg is wired up without opening the GUI —
+it resolves ffmpeg/ffprobe, probes the file, writes a report to `%TEMP%\dvs_selftest.txt`, and
+exits 0 on success:
+
+```bat
+dist\DiscordVidShare\DiscordVidShare.exe --selftest "C:\path\to\clip.mp4"
+```
 
 ## How the size targeting works
 

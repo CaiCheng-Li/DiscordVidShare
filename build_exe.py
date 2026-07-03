@@ -19,7 +19,9 @@ from pathlib import Path
 
 APP_NAME = "DiscordVidShare"
 ROOT = Path(__file__).resolve().parent
-ENTRY = ROOT / "discordvidshare" / "__main__.py"
+# Absolute-import launcher: analysing the package's __main__.py directly leaves
+# PySide6 out of the bundle (its relative import isn't followed as a script).
+ENTRY = ROOT / "pyi_entry.py"
 
 
 def main() -> int:
@@ -57,6 +59,10 @@ def main() -> int:
         "--windowed",
         "--name",
         APP_NAME,
+        "--paths",
+        str(ROOT),
+        "--collect-submodules",
+        "discordvidshare",
         str(ENTRY),
     ]
     for binary in add_binaries:

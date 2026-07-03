@@ -14,7 +14,7 @@ import shutil
 import tempfile
 from dataclasses import dataclass
 
-from PySide6.QtCore import QObject, QProcess, Signal
+from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, Signal
 
 from . import ffmpeg_utils
 
@@ -130,6 +130,14 @@ class Encoder(QObject):
 
         proc = QProcess(self)
         proc.setProcessChannelMode(QProcess.ProcessChannelMode.SeparateChannels)
+        # In a frozen build, spawn ffmpeg with PyInstaller's bundle dirs removed from
+        # PATH so it resolves system DLLs correctly (see ffmpeg_utils.child_env).
+        env = ffmpeg_utils.child_env()
+        if env is not None:
+            qenv = QProcessEnvironment()
+            for key, value in env.items():
+                qenv.insert(key, value)
+            proc.setProcessEnvironment(qenv)
         proc.readyReadStandardOutput.connect(self._on_stdout)
         proc.readyReadStandardError.connect(self._on_stderr)
         proc.finished.connect(self._on_pass_finished)
