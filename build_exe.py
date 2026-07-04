@@ -12,12 +12,15 @@ checks the app directory first, so the bundled binaries are picked up automatica
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 APP_NAME = "DiscordVidShare"
+ICON_NAME = "DVS_favicon.png"
+ICO_NAME = "DVS_favicon.ico"   # multi-size exe icon; regenerate via scripts/make_ico.py
 ROOT = Path(__file__).resolve().parent
 # Absolute-import launcher: analysing the package's __main__.py directly leaves
 # PySide6 out of the bundle (its relative import isn't followed as a script).
@@ -65,6 +68,18 @@ def main() -> int:
         "discordvidshare",
         str(ENTRY),
     ]
+    # Give the .exe its own Explorer/taskbar icon (needs a real .ico).
+    ico = ROOT / ICO_NAME
+    if ico.exists():
+        cmd += ["--icon", str(ico)]
+    else:
+        print(f"Warning: {ICO_NAME} not found; run scripts/make_ico.py to create it.")
+    # Bundle the PNG at the app root so _resource_path/setWindowIcon finds it at runtime.
+    icon = ROOT / ICON_NAME
+    if icon.exists():
+        cmd += ["--add-data", f"{icon}{os.pathsep}."]
+    else:
+        print(f"Warning: {ICON_NAME} not found; building without a bundled icon.")
     for binary in add_binaries:
         cmd += ["--add-binary", binary]
 

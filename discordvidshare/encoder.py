@@ -25,6 +25,20 @@ LOW_BITRATE_FLOOR_BPS = 100_000
 
 _LIB = {"h264": "libx264", "h265": "libx265"}
 
+# Resolution ladder (frame heights) for the size guarantee. At a starved bitrate H.264
+# bottoms out at QP=51 and can't compress the frames any smaller, so the file overshoots
+# the target — and lowering -b:v further does nothing once it's pinned at the wall. The
+# only fix is fewer pixels: on overshoot we re-encode a rung lower until the file fits.
+RES_LADDER = (1080, 720, 480, 360, 240)
+
+
+def next_scale_height(current_height: int) -> int | None:
+    """Largest ladder height strictly below current_height, or None if none is lower."""
+    for h in RES_LADDER:
+        if h < current_height:
+            return h
+    return None
+
 
 # --- pure bitrate math (no Qt, unit-testable) ---------------------------------
 
@@ -69,6 +83,9 @@ class EncodeJob:
     scale_height: int | None = None   # None = keep source resolution
     preset: str = "medium"
     safety: float = DEFAULT_SAFETY
+    fps: float = 0.0             # CFR target (source avg fps); 0 = don't force a rate
+    src_width: int = 0           # source dimensions — used by the auto-fit ladder
+    src_height: int = 0
 
     @property
     def audio_bitrate_bps(self) -> int:
@@ -101,6 +118,7 @@ class Encoder(QObject):
         self._tmpdir: str | None = None
         self._cancelled = False
         self._stderr_tail: list[str] = []
+        self._attempt_scale: int | None = None   # effective scale for the current attempt
 
     # -- lifecycle -------------------------------------------------------------
 
@@ -110,6 +128,7 @@ class Encoder(QObject):
         self._job = job
         self._cancelled = False
         self._stderr_tail = []
+        self._attempt_scale = job.scale_height
         self._tmpdir = tempfile.mkdtemp(prefix="dvs_pass_")
         self._run_pass(1)
 
@@ -144,8 +163,7 @@ class Encoder(QObject):
         proc.errorOccurred.connect(self._on_error)
         self._proc = proc
 
-        stage = "Pass 1 of 2 (analyzing)" if pass_no == 1 else "Pass 2 of 2 (encoding)"
-        self.progress.emit(0 if pass_no == 1 else 50, stage)
+        self.progress.emit(0 if pass_no == 1 else 50, self._stage_label())
         proc.start(ffmpeg_utils.discover_ffmpeg(), args)
 
     def _build_args(self, job: EncodeJob, pass_no: int) -> list[str]:
@@ -158,13 +176,23 @@ class Encoder(QObject):
             "-ss", _timecode_arg(job.start),
             "-i", job.input_path,
             "-t", _timecode_arg(job.duration),
+        ]
+        # Normalize to a constant frame rate before encoding. Phone videos and game
+        # capture (Medal, OBS, ...) are often variable-frame-rate; with VFR the two
+        # passes can disagree on the frame timeline, breaking the encode (and causing
+        # A/V desync). '-fps_mode cfr' plus the source's average fps pins both passes
+        # to the same grid. Must apply to BOTH passes so their stats align.
+        args += ["-fps_mode", "cfr"]
+        if job.fps and job.fps > 0:
+            args += ["-r", f"{job.fps:.6f}"]
+        args += [
             "-c:v", lib,
             "-b:v", str(vb),
             "-preset", job.preset,
             "-pix_fmt", "yuv420p",
         ]
-        if job.scale_height:
-            args += ["-vf", f"scale=-2:{job.scale_height}"]
+        if self._attempt_scale:
+            args += ["-vf", f"scale=-2:{self._attempt_scale}"]
         args += self._pass_args(pass_no)
 
         if pass_no == 1:
@@ -205,7 +233,10 @@ class Encoder(QObject):
         self.progress.emit(int(base + frac * span), self._stage_label())
 
     def _stage_label(self) -> str:
-        return "Pass 1 of 2 (analyzing)" if self._pass == 1 else "Pass 2 of 2 (encoding)"
+        base = "Pass 1 of 2 (analyzing)" if self._pass == 1 else "Pass 2 of 2 (encoding)"
+        if self._attempt_scale:
+            base += f" @ {self._attempt_scale}p"
+        return base
 
     def _on_stderr(self) -> None:
         if self._proc is None:
@@ -245,24 +276,56 @@ class Encoder(QObject):
             self._run_pass(2)
             return
 
-        # Success.
+        # Pass 2 done — verify the result actually fits the target.
         job = self._job
+        assert job is not None
+        from .media_info import format_size
+        size = os.path.getsize(job.output_path) if os.path.exists(job.output_path) else None
+
+        # Size guarantee: if we overshot, H.264 hit the QP=51 wall and couldn't pack the
+        # frames small enough. Re-encoding at the same bitrate won't help — drop to the
+        # next resolution rung (fewer pixels => lower size floor) and try again.
+        if size is not None and size > job.target_bytes:
+            cur_h = self._attempt_scale or job.src_height or 0
+            nxt = next_scale_height(cur_h) if cur_h else None
+            if nxt is not None:
+                self._attempt_scale = nxt
+                self._stderr_tail = []
+                self._discard_output()
+                shutil.rmtree(self._tmpdir, ignore_errors=True)  # fresh pass-log dir
+                self._tmpdir = tempfile.mkdtemp(prefix="dvs_pass_")
+                self.log.emit(
+                    f"Output {format_size(size)} exceeded the {format_size(job.target_bytes)} "
+                    f"target; re-encoding at {nxt}p to fit."
+                )
+                self._run_pass(1)
+                return
+            # Ladder exhausted and still over — can't fit this clip at this duration.
+            self._cleanup(remove_output=False)
+            self.progress.emit(100, "Finished (over target)")
+            self.finished.emit(
+                False,
+                f"Smallest attempt is {format_size(size)} at {cur_h}p — still over the "
+                f"{format_size(job.target_bytes)} target. Trim the clip shorter or lower the "
+                f"frame rate.",
+            )
+            return
+
+        # Under target — done.
         self._cleanup(remove_output=False)
-        size = None
-        if job is not None and os.path.exists(job.output_path):
-            size = os.path.getsize(job.output_path)
         self.progress.emit(100, "Done")
-        msg = "Export complete."
-        if size is not None:
-            from .media_info import format_size
-            msg = f"Export complete — {format_size(size)}."
+        msg = f"Export complete — {format_size(size)}." if size is not None else "Export complete."
         self.finished.emit(True, msg)
 
     def _cleanup(self, remove_output: bool) -> None:
         if self._tmpdir and os.path.isdir(self._tmpdir):
             shutil.rmtree(self._tmpdir, ignore_errors=True)
         self._tmpdir = None
-        if remove_output and self._job is not None:
+        if remove_output:
+            self._discard_output()
+
+    def _discard_output(self) -> None:
+        if self._job is not None:
             try:
                 if os.path.exists(self._job.output_path):
                     os.remove(self._job.output_path)

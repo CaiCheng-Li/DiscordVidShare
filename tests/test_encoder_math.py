@@ -7,8 +7,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from discordvidshare.encoder import (  # noqa: E402
     DEFAULT_SAFETY,
+    RES_LADDER,
     compute_video_bitrate_bps,
     estimate_output_bytes,
+    next_scale_height,
 )
 from discordvidshare.media_info import (  # noqa: E402
     format_timecode,
@@ -45,6 +47,24 @@ def test_audio_budget_is_subtracted():
 
 def test_zero_duration_is_safe():
     assert compute_video_bitrate_bps(1_000_000, 0.0) == 0
+
+
+def test_ladder_steps_down_from_source_height():
+    # From full HD, walk the ladder down one rung at a time to the floor, then stop.
+    assert next_scale_height(1080) == 720
+    assert next_scale_height(720) == 480
+    assert next_scale_height(480) == 360
+    assert next_scale_height(360) == 240
+    assert next_scale_height(240) is None  # nothing lower — auto-fit gives up here
+
+
+def test_ladder_snaps_below_odd_source_heights():
+    # A 1440p or 2160p source steps to the largest rung strictly below it.
+    assert next_scale_height(2160) == 1080
+    assert next_scale_height(1440) == 1080
+    assert next_scale_height(500) == 480
+    # Ladder is strictly descending (used to guarantee downward progress).
+    assert list(RES_LADDER) == sorted(RES_LADDER, reverse=True)
 
 
 def test_timecode_round_trip():

@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, Qt, QUrl
-from PySide6.QtGui import QAction, QDesktopServices
+from PySide6.QtGui import QAction, QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QProgressBar,
@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 
 from . import __app_name__, ffmpeg_utils
 from .encoder import LOW_BITRATE_FLOOR_BPS, EncodeJob, Encoder, compute_video_bitrate_bps
-from .media_info import MediaInfo, format_size, format_timecode, parse_timecode
+from .media_info import VIDEO_EXTS, MediaInfo, format_size, format_timecode, parse_timecode
 from .widgets.range_slider import RangeSlider
 from .widgets.video_player import VideoPlayer
 
@@ -23,8 +23,6 @@ VIDEO_FILTER = (
     "Video files (*.mp4 *.mov *.mkv *.avi *.webm *.m4v *.wmv *.flv *.mpg *.mpeg *.ts);;"
     "All files (*.*)"
 )
-VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".wmv", ".flv",
-              ".mpg", ".mpeg", ".ts"}
 
 # (label, megabytes) — Discord's common upload tiers plus a couple of extras.
 SIZE_PRESETS = [
@@ -47,6 +45,7 @@ class MainWindow(QMainWindow):
         self.settings = QSettings()
         self.info: MediaInfo | None = None
         self.encoder: Encoder | None = None
+        self._pending_output = ""    # output path of the in-flight export
         self._in = 0.0
         self._out = 0.0
         self._syncing = False
@@ -66,22 +65,25 @@ class MainWindow(QMainWindow):
 
     def _build_ui(self) -> None:
         central = QWidget()
+        central.setObjectName("CentralWidget")
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
-        root.setContentsMargins(10, 10, 10, 10)
-        root.setSpacing(8)
+        root.setContentsMargins(14, 14, 14, 14)
+        root.setSpacing(12)
 
         # Top bar: open + file summary.
         top = QHBoxLayout()
+        top.setSpacing(12)
         self.open_btn = QPushButton("Open Video…")
         self.info_label = QLabel("No file loaded — open a video or drag one here.")
-        self.info_label.setStyleSheet("color: palette(mid);")
+        self.info_label.setObjectName("InfoLabel")
         top.addWidget(self.open_btn)
         top.addWidget(self.info_label, 1)
         root.addLayout(top)
 
         # Preview.
         self.player = VideoPlayer()
+        self.player.setObjectName("VideoPanel")
         self.player.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         root.addWidget(self.player, 1)
 
@@ -95,11 +97,13 @@ class MainWindow(QMainWindow):
         self.play_btn = QPushButton(self._icon(QStyle.StandardPixmap.SP_MediaPlay), "")
         self.next_btn = QPushButton(self._icon(QStyle.StandardPixmap.SP_MediaSkipForward), "")
         for b in (self.prev_btn, self.play_btn, self.next_btn):
+            b.setObjectName("Transport")
             b.setFixedWidth(48)
-        self.prev_btn.setToolTip("Previous frame")
-        self.next_btn.setToolTip("Next frame")
+        self.prev_btn.setToolTip("Jump to trim start (In)")
+        self.next_btn.setToolTip("Jump to trim end (Out)")
         self.play_btn.setToolTip("Play / Pause")
         self.time_label = QLabel("00:00:00.000  ·  frame 0")
+        self.time_label.setObjectName("TimeLabel")
         transport.addWidget(self.prev_btn)
         transport.addWidget(self.play_btn)
         transport.addWidget(self.next_btn)
@@ -121,8 +125,9 @@ class MainWindow(QMainWindow):
         self.progress.setValue(0)
         self.progress.setTextVisible(True)
         self.progress.setFormat("Idle")
-        self.export_btn = QPushButton("Compress & Export")
-        self.export_btn.setMinimumHeight(34)
+        self.export_btn = QPushButton("Compress && Export")
+        self.export_btn.setObjectName("Primary")
+        self.export_btn.setMinimumHeight(40)
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.setEnabled(False)
         prog.addWidget(self.export_btn)
@@ -133,13 +138,18 @@ class MainWindow(QMainWindow):
         self.status = self.statusBar()
 
     def _build_trim_group(self) -> QGroupBox:
-        group = QGroupBox("Trim")
+        group = QGroupBox("TRIM")
         grid = QGridLayout(group)
+        grid.setContentsMargins(14, 14, 14, 14)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(8)
 
-        self.set_in_btn = QPushButton("Set In ⟨")
-        self.set_out_btn = QPushButton("Set Out ⟩")
+        self.set_in_btn = QPushButton("Set In")
+        self.set_out_btn = QPushButton("Set Out")
         self.in_edit = QLineEdit()
         self.out_edit = QLineEdit()
+        self.in_edit.setObjectName("Timecode")
+        self.out_edit.setObjectName("Timecode")
         self.in_edit.setFixedWidth(120)
         self.out_edit.setFixedWidth(120)
         self.in_frame = QSpinBox()
@@ -157,6 +167,7 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.out_frame, 1, 2)
 
         self.sel_label = QLabel("Selection: —")
+        self.sel_label.setObjectName("SelLabel")
         grid.addWidget(self.sel_label, 2, 0, 1, 3)
 
         self.extract_btn = QPushButton("Extract Frame…")
@@ -164,8 +175,11 @@ class MainWindow(QMainWindow):
         return group
 
     def _build_export_group(self) -> QGroupBox:
-        group = QGroupBox("Output size & format")
+        group = QGroupBox("OUTPUT SIZE && FORMAT")
         grid = QGridLayout(group)
+        grid.setContentsMargins(14, 14, 14, 14)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(8)
 
         grid.addWidget(QLabel("Target size:"), 0, 0)
         self.size_spin = QDoubleSpinBox()
@@ -215,13 +229,32 @@ class MainWindow(QMainWindow):
         self.estimate_label.setWordWrap(True)
         grid.addWidget(self.estimate_label, 5, 0, 1, 2)
 
-        grid.addWidget(QLabel("Save to:"), 6, 0)
-        out_row = QHBoxLayout()
-        self.out_edit_path = QLineEdit()
+        # Folder and file name are separate fields — the '.mp4' is fixed, so the output
+        # can never end up extension-less (which breaks ffmpeg's muxer selection).
+        grid.addWidget(QLabel("Folder:"), 6, 0)
+        folder_row = QHBoxLayout()
+        self.folder_edit = QLineEdit()
+        self.folder_edit.setPlaceholderText("Choose a save folder")
         self.browse_btn = QPushButton("Browse…")
-        out_row.addWidget(self.out_edit_path, 1)
-        out_row.addWidget(self.browse_btn)
-        grid.addLayout(out_row, 6, 1)
+        folder_row.addWidget(self.folder_edit, 1)
+        folder_row.addWidget(self.browse_btn)
+        grid.addLayout(folder_row, 6, 1)
+
+        grid.addWidget(QLabel("File name:"), 7, 0)
+        name_row = QHBoxLayout()
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("clip")
+        ext_label = QLabel(".mp4")
+        ext_label.setObjectName("ExtLabel")
+        name_row.addWidget(self.name_edit, 1)
+        name_row.addWidget(ext_label)
+        grid.addLayout(name_row, 7, 1)
+
+        self.remember_dir_check = QCheckBox("Save to last-used folder")
+        self.remember_dir_check.setToolTip(
+            "On: new videos default their save folder to the one you last saved into.\n"
+            "Off: new videos default to the source video's folder.")
+        grid.addWidget(self.remember_dir_check, 8, 1)
         return group
 
     def _build_menu(self) -> None:
@@ -242,6 +275,15 @@ class MainWindow(QMainWindow):
         file_menu.addAction(act_quit)
 
         help_menu = self.menuBar().addMenu("&Help")
+        act_tutorial = QAction("Show &Tutorial…", self)
+        act_tutorial.triggered.connect(lambda: self.show_tutorial())
+        help_menu.addAction(act_tutorial)
+
+        act_shortcut = QAction("Create &Desktop Shortcut…", self)
+        act_shortcut.triggered.connect(lambda: self.create_desktop_shortcut())
+        help_menu.addAction(act_shortcut)
+        help_menu.addSeparator()
+
         act_about = QAction("&About", self)
         act_about.triggered.connect(self._show_about)
         help_menu.addAction(act_about)
@@ -251,14 +293,22 @@ class MainWindow(QMainWindow):
 
         self.player.positionChanged.connect(self._on_position)
         self.player.playingChanged.connect(self._on_playing_changed)
+        self.player.fileDropped.connect(self._on_file_dropped)   # drop onto the preview to replace
 
         self.slider.playheadChanged.connect(self.player.seek)
         self.slider.inChanged.connect(lambda t: self._apply_in(t, seek=True))
         self.slider.outChanged.connect(lambda t: self._apply_out(t, seek=True))
 
-        self.prev_btn.clicked.connect(lambda: self.player.step_frames(-1))
-        self.next_btn.clicked.connect(lambda: self.player.step_frames(1))
+        self.prev_btn.clicked.connect(self.jump_to_in)
+        self.next_btn.clicked.connect(self.jump_to_out)
         self.play_btn.clicked.connect(self.player.toggle_play)
+
+        # Frame stepping moved off the transport buttons (they now jump to In/Out);
+        # keep it on the arrow keys so frame-accurate positioning is still available.
+        self._sc_prev_frame = QShortcut(QKeySequence(Qt.Key.Key_Left), self)
+        self._sc_prev_frame.activated.connect(lambda: self._step_frames(-1))
+        self._sc_next_frame = QShortcut(QKeySequence(Qt.Key.Key_Right), self)
+        self._sc_next_frame.activated.connect(lambda: self._step_frames(1))
 
         self.set_in_btn.clicked.connect(lambda: self._apply_in(self.player.position()))
         self.set_out_btn.clicked.connect(lambda: self._apply_out(self.player.position()))
@@ -275,7 +325,10 @@ class MainWindow(QMainWindow):
         self.audio_check.toggled.connect(self._on_audio_toggled)
         self.audio_bitrate.currentIndexChanged.connect(self._update_estimate)
         self.res_combo.currentIndexChanged.connect(self._update_estimate)
-        self.browse_btn.clicked.connect(self.browse_output)
+        self.browse_btn.clicked.connect(self.browse_folder)
+        self.remember_dir_check.setChecked(
+            self.settings.value("use_last_output_dir", True, bool))
+        self.remember_dir_check.toggled.connect(self._on_remember_dir_toggled)
 
         self.export_btn.clicked.connect(self.start_export)
         self.cancel_btn.clicked.connect(self.cancel_export)
@@ -318,6 +371,11 @@ class MainWindow(QMainWindow):
             self.load_video(path)
 
     def load_video(self, path: str) -> None:
+        if self.encoder is not None and self.encoder.is_running():
+            QMessageBox.information(
+                self, "Export in progress",
+                "Finish or cancel the current export before opening another video.")
+            return
         if not ffmpeg_utils.ffmpeg_available():
             self._refresh_ffmpeg_status()
             return
@@ -355,9 +413,8 @@ class MainWindow(QMainWindow):
         if not info.has_audio:
             self.audio_check.setChecked(False)
 
-        # Default output path next to the source.
-        src = Path(path)
-        self.out_edit_path.setText(str(src.with_name(f"{src.stem}_trimmed.mp4")))
+        # Default output path: last-used folder (if enabled) else next to the source.
+        self._apply_default_output_path()
 
         self._set_controls_enabled(True)
         self._refresh_trim_widgets()
@@ -446,6 +503,20 @@ class MainWindow(QMainWindow):
 
     # -- playback callbacks ----------------------------------------------------
 
+    def jump_to_in(self) -> None:
+        """Move the playhead to the start of the trim selection."""
+        if self.info:
+            self.player.seek(self._in)
+
+    def jump_to_out(self) -> None:
+        """Move the playhead to the end of the trim selection."""
+        if self.info:
+            self.player.seek(self._out)
+
+    def _step_frames(self, delta: int) -> None:
+        if self.info:
+            self.player.step_frames(delta)
+
     def _on_position(self, seconds: float) -> None:
         if not self.info:
             return
@@ -517,28 +588,81 @@ class MainWindow(QMainWindow):
                 f" + audio {audio_bps // 1000 if audio_bps else 0} kbps")
         if vb < LOW_BITRATE_FLOOR_BPS:
             text += "  ⚠ very low bitrate — expect blocky video; try a shorter clip or lower resolution."
-            self.estimate_label.setStyleSheet("color: #d08000;")
+            self.estimate_label.setStyleSheet("color: #F0B232;")  # theme WARNING
         else:
             self.estimate_label.setStyleSheet("")
         self.estimate_label.setText(text)
 
     # -- export ----------------------------------------------------------------
 
-    def browse_output(self) -> None:
-        current = self.out_edit_path.text() or self.settings.value("last_dir", "", str)
-        path, _ = QFileDialog.getSaveFileName(self, "Save compressed video", current,
-                                              "MP4 video (*.mp4)")
-        if path:
-            self.out_edit_path.setText(path)
+    def _default_output_dir(self, src_path: str) -> str:
+        """Save folder for a source: last-used folder if the option is on and it still
+        exists, otherwise the source video's own folder."""
+        if self.remember_dir_check.isChecked():
+            last = self.settings.value("last_output_dir", "", str)
+            if last and Path(last).is_dir():
+                return last
+        return str(Path(src_path).parent)
+
+    def _apply_default_output_path(self) -> None:
+        if self.info:
+            src = Path(self.info.path)
+            self.folder_edit.setText(self._default_output_dir(self.info.path))
+            self.name_edit.setText(f"{src.stem}_trimmed")
+
+    @staticmethod
+    def _sanitize_stem(name: str) -> str:
+        """A safe base file name (no extension): drop a typed '.mp4', replace characters
+        Windows forbids in a filename, and trim trailing dots/spaces."""
+        name = name.strip()
+        if name.lower().endswith(".mp4"):
+            name = name[:-4]
+        name = "".join("_" if c in '\\/:*?"<>|' else c for c in name)
+        return name.strip().rstrip(". ")
+
+    def _output_path(self) -> str | None:
+        """Compose folder + name + '.mp4', or None if either field is empty."""
+        folder = self.folder_edit.text().strip()
+        stem = self._sanitize_stem(self.name_edit.text())
+        if not folder or not stem:
+            return None
+        return str(Path(folder) / f"{stem}.mp4")
+
+    def _remember_output_dir(self, folder: str) -> None:
+        """Record a folder as the next default save location."""
+        if folder:
+            self.settings.setValue("last_output_dir", folder)
+
+    def _on_remember_dir_toggled(self, checked: bool) -> None:
+        self.settings.setValue("use_last_output_dir", checked)
+        self._apply_default_output_path()   # reflect the new preference in the folder field
+
+    def browse_folder(self) -> None:
+        start = (self.folder_edit.text().strip()
+                 or self.settings.value("last_output_dir", "", str)
+                 or self.settings.value("last_dir", "", str))
+        folder = QFileDialog.getExistingDirectory(self, "Choose save folder", start)
+        if folder:
+            self.folder_edit.setText(folder)
+            self._remember_output_dir(folder)   # a browsed folder becomes the new default
 
     def start_export(self) -> None:
         if not self.info:
             return
         if self.encoder is not None and self.encoder.is_running():
             return
-        out_path = self.out_edit_path.text().strip()
+        out_path = self._output_path()
         if not out_path:
-            QMessageBox.warning(self, "No output path", "Choose where to save the file.")
+            QMessageBox.warning(self, "Missing output",
+                                "Choose a save folder and enter a file name.")
+            return
+        # Reflect the sanitized name back so the field matches what will be written.
+        self.name_edit.setText(Path(out_path).stem)
+        out_dir = os.path.dirname(os.path.abspath(out_path))
+        if not os.path.isdir(out_dir):
+            QMessageBox.warning(self, "Folder not found",
+                                f"This folder does not exist:\n{out_dir}\n\n"
+                                "Pick a different location.")
             return
         if os.path.abspath(out_path) == os.path.abspath(self.info.path):
             QMessageBox.warning(self, "Same file", "Output path must differ from the source.")
@@ -551,7 +675,9 @@ class MainWindow(QMainWindow):
             resp = QMessageBox.question(
                 self, "Very low bitrate",
                 f"The target size gives only ~{vb / 1000:.0f} kbps of video, which will look "
-                "rough. Export anyway?",
+                "rough at this resolution. If the encode overshoots the size limit, the app "
+                "will automatically downscale and re-encode until the file fits.\n\n"
+                "Export anyway?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if resp != QMessageBox.StandardButton.Yes:
@@ -571,8 +697,12 @@ class MainWindow(QMainWindow):
             keep_audio=self.audio_check.isChecked() and self.info.has_audio,
             audio_kbps=self._audio_kbps(),
             scale_height=scale_height,
+            fps=self.info.fps,   # normalize VFR sources to this constant rate
+            src_width=self.info.width,
+            src_height=self.info.height,   # start rung for the auto-fit ladder
         )
 
+        self._pending_output = out_path   # remembered for the finished handler
         self.player.pause()
         self.encoder = Encoder(self)
         self.encoder.progress.connect(self._on_encode_progress)
@@ -599,7 +729,8 @@ class MainWindow(QMainWindow):
         self.progress.setValue(100 if success else 0)
         self.encoder = None
         if success:
-            out_path = self.out_edit_path.text().strip()
+            out_path = self._pending_output
+            self._remember_output_dir(str(Path(out_path).parent))   # default future saves here
             box = QMessageBox(self)
             box.setWindowTitle("Export complete")
             box.setIcon(QMessageBox.Icon.Information)
@@ -620,7 +751,7 @@ class MainWindow(QMainWindow):
         for w in (self.slider, self.prev_btn, self.play_btn, self.next_btn,
                   self.set_in_btn, self.set_out_btn, self.in_edit, self.out_edit,
                   self.in_frame, self.out_frame, self.extract_btn, self.export_btn,
-                  self.browse_btn):
+                  self.browse_btn, self.folder_edit, self.name_edit):
             w.setEnabled(enabled)
 
     def _set_exporting(self, exporting: bool) -> None:
@@ -628,7 +759,7 @@ class MainWindow(QMainWindow):
         for w in (self.export_btn, self.open_btn, self.set_in_btn, self.set_out_btn,
                   self.extract_btn, self.size_spin, self.unit_combo, self.preset_combo,
                   self.codec_combo, self.audio_check, self.audio_bitrate, self.res_combo,
-                  self.browse_btn, self.out_edit_path):
+                  self.browse_btn, self.folder_edit, self.name_edit):
             w.setEnabled(not exporting)
         if exporting:
             self.progress.setValue(0)
@@ -644,10 +775,56 @@ class MainWindow(QMainWindow):
     def dropEvent(self, event) -> None:
         for url in event.mimeData().urls():
             if url.isLocalFile() and Path(url.toLocalFile()).suffix.lower() in VIDEO_EXTS:
-                self.load_video(url.toLocalFile())
+                self._on_file_dropped(url.toLocalFile())
                 return
 
+    def _on_file_dropped(self, path: str) -> None:
+        """Handle a dropped video. If a clip is already open, confirm the swap first."""
+        if self.encoder is not None and self.encoder.is_running():
+            # Defer to load_video, which shows the "export in progress" refusal.
+            self.load_video(path)
+            return
+        if self.info is not None:
+            resp = QMessageBox.question(
+                self, "Replace video?",
+                f"Replace the open video with “{Path(path).name}”?\n"
+                "The current trim selection will be reset.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if resp != QMessageBox.StandardButton.Yes:
+                return
+        self.load_video(path)
+
     # -- misc ------------------------------------------------------------------
+
+    # -- onboarding ------------------------------------------------------------
+
+    def run_first_launch(self) -> None:
+        """Show the tutorial the first time the app is ever opened. Safe to call
+        on every launch — it's a no-op once the tutorial has been seen."""
+        from . import onboarding
+
+        if onboarding.should_show_tutorial(self.settings):
+            self.show_tutorial(first_run=True)
+
+    def show_tutorial(self, first_run: bool = False) -> None:
+        from . import onboarding
+
+        onboarding.WelcomeDialog(self, self.settings, first_run=first_run).exec()
+
+    def create_desktop_shortcut(self) -> None:
+        from . import onboarding
+
+        ok, detail = onboarding.create_desktop_shortcut()
+        if ok:
+            self.statusBar().showMessage(f"Desktop shortcut created → {detail}", 5000)
+            QMessageBox.information(
+                self, "Shortcut created",
+                f"A shortcut to {__app_name__} was placed on your desktop.",
+            )
+        else:
+            QMessageBox.warning(self, "Shortcut not created", detail)
 
     def _show_about(self) -> None:
         from . import __version__

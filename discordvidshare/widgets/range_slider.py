@@ -9,8 +9,12 @@ from __future__ import annotations
 from enum import Enum, auto
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QPalette, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
+
+# Discord red — matches the app's DANGER accent (see theme.py). Kept local so the
+# widget stays free of theme imports.
+_PLAYHEAD = QColor("#F23F43")
 
 
 class _Drag(Enum):
@@ -25,9 +29,9 @@ class RangeSlider(QWidget):
     outChanged = Signal(float)        # user moved the Out handle (seconds)
     playheadChanged = Signal(float)   # user scrubbed the playhead (seconds)
 
-    _MARGIN = 8       # px reserved on each side for handle width
-    _HANDLE_W = 8
-    _GRAB_PX = 12     # click tolerance for grabbing a handle
+    _MARGIN = 10      # px reserved on each side for handle width
+    _HANDLE_W = 10
+    _GRAB_PX = 14     # click tolerance for grabbing a handle
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -37,7 +41,7 @@ class RangeSlider(QWidget):
         self._pos = 0.0
         self._min_gap = 0.001
         self._drag = _Drag.NONE
-        self.setMinimumHeight(56)
+        self.setMinimumHeight(60)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setMouseTracking(True)
         self.setEnabled(False)
@@ -150,35 +154,37 @@ class RangeSlider(QWidget):
         pal = self.palette()
 
         w, h = self.width(), self.height()
-        track_h = 12
+        track_h = 8
+        radius = track_h / 2
         track_top = (h - track_h) / 2
         track_rect = QRectF(self._MARGIN, track_top, w - 2 * self._MARGIN, track_h)
 
-        # Base track.
-        base = pal.mid().color() if self.isEnabled() else pal.window().color().darker(105)
+        # Base track — a quiet inset groove.
+        base = pal.mid().color() if self.isEnabled() else pal.window().color().lighter(115)
         path = QPainterPath()
-        path.addRoundedRect(track_rect, 5, 5)
+        path.addRoundedRect(track_rect, radius, radius)
         painter.fillPath(path, base)
 
         if self._duration > 0:
             x_in = self._x_for(self._in)
             x_out = self._x_for(self._out)
 
-            # Selected region.
-            sel_rect = QRectF(x_in, track_top, max(1.0, x_out - x_in), track_h)
-            accent = pal.highlight().color()
+            # Selected region — blurple, echoing the app icon's gradient. Read the
+            # *Active* highlight so the bar keeps its color when the window loses
+            # focus (the Inactive group's highlight is a muted grey on Windows).
+            sel_rect = QRectF(x_in, track_top, max(2.0, x_out - x_in), track_h)
+            accent = pal.color(QPalette.ColorGroup.Active, QPalette.ColorRole.Highlight)
             sel_path = QPainterPath()
-            sel_path.addRoundedRect(sel_rect, 5, 5)
+            sel_path.addRoundedRect(sel_rect, radius, radius)
             painter.fillPath(sel_path, accent)
 
-            # Playhead.
+            # Playhead — Discord red, matches the app's danger accent.
             x_pos = self._x_for(self._pos)
-            playhead = QColor("#ff5252")
-            painter.setPen(QPen(playhead, 2))
-            painter.drawLine(QPointF(x_pos, track_top - 6), QPointF(x_pos, track_top + track_h + 6))
-            painter.setBrush(playhead)
+            painter.setPen(QPen(_PLAYHEAD, 2))
+            painter.drawLine(QPointF(x_pos, track_top - 9), QPointF(x_pos, track_top + track_h + 9))
+            painter.setBrush(_PLAYHEAD)
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawEllipse(QPointF(x_pos, track_top - 6), 3.5, 3.5)
+            painter.drawEllipse(QPointF(x_pos, track_top - 9), 4.0, 4.0)
 
             # In / Out handles.
             self._draw_handle(painter, x_in, track_top, track_h, pal)
@@ -186,12 +192,14 @@ class RangeSlider(QWidget):
 
     def _draw_handle(self, painter: QPainter, x: float, top: float, track_h: float, pal) -> None:
         hw = self._HANDLE_W
-        rect = QRectF(x - hw / 2, top - 5, hw, track_h + 10)
-        painter.setPen(QPen(pal.window().color(), 1))
-        painter.setBrush(pal.highlight().color().darker(115))
-        painter.drawRoundedRect(rect, 3, 3)
+        rect = QRectF(x - hw / 2, top - 7, hw, track_h + 14)
+        accent = pal.color(QPalette.ColorGroup.Active, QPalette.ColorRole.Highlight)
+        # Rounded blurple pill, a touch brighter than the selection so it pops,
+        # ringed by the canvas colour for a crisp edge.
+        painter.setPen(QPen(pal.window().color(), 1.5))
+        painter.setBrush(accent.lighter(112))
+        painter.drawRoundedRect(rect, hw / 2, hw / 2)
         # grip line
-        painter.setPen(QPen(pal.brightText().color() if pal.window().color().lightness() < 128
-                            else pal.window().color(), 1))
+        painter.setPen(QPen(QColor(255, 255, 255, 205), 1.2))
         cx = rect.center().x()
-        painter.drawLine(QPointF(cx, top), QPointF(cx, top + track_h))
+        painter.drawLine(QPointF(cx, top - 1), QPointF(cx, top + track_h + 1))

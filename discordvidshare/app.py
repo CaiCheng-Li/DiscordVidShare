@@ -5,11 +5,34 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+from pathlib import Path
 
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
-from . import __app_name__
+from . import __app_name__, __version__
 from .main_window import MainWindow
+
+_ICON_NAME = "DVS_favicon.png"
+
+
+def _resource_path(name: str) -> str | None:
+    """Locate a bundled data file. Mirrors ffmpeg_utils' discovery: `sys._MEIPASS`
+    (PyInstaller onefile/onedir) and the exe dir when frozen, else the source-tree
+    root. Returns None if the file isn't found."""
+    dirs: list[Path] = []
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            dirs.append(Path(meipass))
+        dirs.append(Path(sys.executable).resolve().parent)
+    else:
+        dirs.append(Path(__file__).resolve().parent.parent)
+    for d in dirs:
+        candidate = d / name
+        if candidate.exists():
+            return str(candidate)
+    return None
 
 
 def _run_selftest(rest: list[str]) -> int:
@@ -73,7 +96,24 @@ def main() -> int:
     QApplication.setOrganizationName(__app_name__)
     QApplication.setApplicationDisplayName(__app_name__)
 
+    # Give Windows an explicit AppUserModelID so the taskbar shows our own icon
+    # (and groups under the app) instead of falling back to the host python.exe.
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                f"{__app_name__}.{__version__}"
+            )
+        except Exception:  # noqa: BLE001 — cosmetic only; never block startup
+            pass
+
     app = QApplication(sys.argv)
+    from . import theme
+    theme.apply(app)
+    icon_path = _resource_path(_ICON_NAME)
+    if icon_path:
+        app.setWindowIcon(QIcon(icon_path))
     window = MainWindow()
     window.show()
 
@@ -82,6 +122,11 @@ def main() -> int:
         if arg and not arg.startswith("-"):
             window.load_video(arg)
             break
+
+    # First-launch tutorial (no-op after it's been seen). Deferred so the window
+    # is painted behind the modal dialog before it appears.
+    from PySide6.QtCore import QTimer
+    QTimer.singleShot(0, window.run_first_launch)
 
     return app.exec()
 

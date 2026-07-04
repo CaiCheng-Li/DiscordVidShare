@@ -4,6 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+# Container extensions the app will accept (open dialog + drag-and-drop). Lives here,
+# in the Qt-free engine, so both the window and the preview widget can share one list.
+VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".wmv", ".flv",
+              ".mpg", ".mpeg", ".ts"}
+
 
 @dataclass(frozen=True)
 class MediaInfo:
